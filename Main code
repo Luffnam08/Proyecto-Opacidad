@@ -1,0 +1,130 @@
+#include <Arduino.h>
+#include "funciones.h" 
+#include "funciones.c"
+#define MAX 350
+
+coef_iir_2_ord filtro;
+volatile boolean readFlag = false;
+volatile int High = 0;
+volatile int Low = 1023;
+volatile int analogVal;
+volatile int Filt_out;
+volatile int Prom = 0;
+int Counter = 0;
+#define CONTEO 8
+
+void setup(){
+
+  noInterrupts(); // Suspender interrupciones.
+  // Clear registers
+  TCCR2A = 0;
+  TCCR2B = 0;
+  TCNT2 = 0;
+  // 80.12820512820512 Hz (16000000/((194+1)*1024))
+  OCR2A = 194;
+  // CTC
+  TCCR2A |= (1 << WGM21);
+  // Prescaler 1024
+  TCCR2B |= (1 << CS22) | (1 << CS21) | (1 << CS20);
+  // Output Compare Match A Interrupt Enable
+  TIMSK2 |= (1 << OCIE2A);
+  TCCR1A=0;//Reset al registro
+  TCCR1B=0;//Reset al registro
+  TCNT1=0;// Reset al contador
+  TCCR1A = (1 << COM1A1) | (0 << COM1A0) | (1 << COM1B1) | (1 << COM1B0) | (1 << WGM11) | (1 << WGM10);
+  TCCR1B = (0 << ICNC1) | (0 << ICES1) | (0 << WGM13) | (0 << WGM12) | ( 0<< CS12) | (0 << CS11) | (1 << CS10);
+  // fijar valores iniciales.
+  TCCR0A = 0;
+  TCCR0B = 0;
+  TCNT0 = 0;
+  // 8000 Hz (16000000/((249+1)*8))
+  OCR0A = 249;
+  // CTC
+  TCCR0A |= (1 << WGM01);
+  // Prescaler 8
+  TCCR0B |= (1 << CS01);
+  // Output Compare Match A Interrupt Enable
+  TIMSK0 |= (1 << OCIE0A);
+  // Programar temporizador 0 para producir interrupciones a la tasa de muestreo de 8000 Hz.
+  // Programar conversor A/D para convertir a la máxima velocidad de reloj, pero empleando el temporizador 0 como fuente de disparo (Timer/Counter0 Compare Match A).
+  // Configurar puerto serial para recibir datos a la tasa de muestreo.
+  // Programe el reloj del conversor A/D (preescalización en el ADCPSR) a la máxima tasa posible, Sección 28.4.
+  TCCR0B |= (1 << CS01);
+  // Programe la referencia del conversor A/D (ADMUX) hacia AVCC.
+  ADMUX |= B01000000;
+  // Programe el multiplexor de entrada (registro ADMUX) hacia ADC0.
+  ADMUX |= B00000000;
+  // Programe el registro de datos del conversor A/D de modo que los 8 dígitos binarios menos 
+  // significativos (LSB) queden en ADCL y los 2 más significativos (MSB) en ADCH
+  ADMUX &= B01010000; //B11011111;
+  // Programe el modo de inicio de la conversión en modo libre (free running) (registro ADCSRB).
+  ADCSRB |= B10111000;
+  // Habilite e inicie la conversión A/D en modo libre (bits ADEN, ADSC y ADATE en ADCSRA)
+  ADCSRA |= B11100000;
+  // Habilite la interrupción del conversor A/D (bit ADIE del registro ADCSRA)
+  ADCSRA |= B00001000;
+  // Habilite todas las interrupciones.
+  interrupts();
+  // Inicie la conversión A/D en modo libre (bit ADSC en ADCSRA)
+  ADCSRA |= B01000000;
+  
+  Serial.begin(921600); //Velocidad máxima para que no interfiera con otros procesos//
+  float num[3] = {1, 0, -1};
+  float den[3] = {1, 0.7159209561596, 0.1583844403245};
+  float w[3] = {0.0, 0.0, 0.0};
+  inicializar_iir_2_ord(num, den, w, &filtro);
+  while (!Serial) {
+    ; // Esperar a que el puerto inicie
+  }
+}
+
+int Peak_Detector (int Filt_out){
+  if (Filt_out > High) {
+    High = Filt_out;
+  }
+  if (Filt_out < Low) {
+    Low = Filt_out;
+  }
+  return High - Low;
+}
+
+int Opacity_per (int Amp){
+  Prom = Prom + Amp;
+  Counter ++;
+  if (Counter == MAX){
+    Prom = Prom / (MAX/10);
+  }
+  return Prom;
+}
+
+void loop(){
+}
+
+ISR(ADC_vect){
+  TIFR0 |= (1 << OCF0A); // Bajar la bandera del disparo por timer0.
+  readFlag = true;
+  analogVal = ADCL | (ADCH << 8); // Leer dato
+  //Serial.println(analogVal);
+  Filt_out = filtrarIIR(analogVal, &filtro);
+  //Serial.println(Filt_out);
+}
+ 
+ISR(TIMER0_COMPA_vect){
+}
+
+ISR(TIMER2_COMPA_vect) {
+  int Amp = Peak_Detector(Filt_out);
+  //Serial.println(Amp);
+  int Percent = Opacity_per(Amp);
+  int Percenta = 2.1 * exp(0.006 * Percent);
+  if (Counter == MAX){   
+    Serial.println(Percent);
+    Serial.print(Percenta);
+    Serial.println("% de luz está pasando");
+    Counter = 0;
+    Prom = 0;
+  }
+  High = 0;
+  Low = 1023;
+  Amp = 0;
+}
